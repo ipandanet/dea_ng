@@ -8,6 +8,11 @@ require "dea/directory_server/directory_server_v2"
 require "dea/staging/staging_task"
 
 describe Dea::StagingTask do
+  before(:all) do
+    @emitter = FakeEmitter.new
+    Dea::Loggregator.emitter = @emitter
+  end
+
   let(:memory_limit_mb) { 256 }
   let(:disk_limit_mb) { 1025 }
 
@@ -19,16 +24,16 @@ describe Dea::StagingTask do
 
   let(:config) do
     {
-      "base_dir" => base_dir,
-      "directory_server" => {
-        "file_api_port" => 1234
-      },
-      "staging" => {
-        "environment" => { "BUILDPACK_CACHE" => "buildpack_cache_url" },
-        "memory_limit_mb" => memory_limit_mb,
-        "disk_limit_mb" => disk_limit_mb,
-        "max_staging_duration" => max_staging_duration
-      },
+        "base_dir" => base_dir,
+        "directory_server" => {
+            "file_api_port" => 1234
+        },
+        "staging" => {
+            "environment" => {"BUILDPACK_CACHE" => "buildpack_cache_url"},
+            "memory_limit_mb" => memory_limit_mb,
+            "disk_limit_mb" => disk_limit_mb,
+            "max_staging_duration" => max_staging_duration
+        },
     }
   end
 
@@ -47,8 +52,8 @@ describe Dea::StagingTask do
   let(:staging) { Dea::StagingTask.new(bootstrap, dir_server, attributes, buildpacks_in_use) }
 
   let(:buildpacks_in_use) do
-    [ { "key" => "buildpack1", "uri" => "uri1" },
-      { "key" => "buildpack2", "uri" => "uri2" }
+    [{"key" => "buildpack1", "uri" => "uri1"},
+     {"key" => "buildpack2", "uri" => "uri2"}
     ]
   end
 
@@ -67,47 +72,64 @@ describe Dea::StagingTask do
   end
 
   describe "#promise_stage" do
-    it "assembles a shell command and initiates collection of task log" do
-      staging.container.should_receive(:run_script) do |_, cmd|
-        expect(cmd).to include %Q{export FOO="BAR";}
-        expect(cmd).to include %Q{export BUILDPACK_CACHE="buildpack_cache_url";}
-        expect(cmd).to include %Q{export STAGING_TIMEOUT="900.0";}
-        expect(cmd).to include %Q{export MEMORY_LIMIT="512m";} # the user assiged 512 should overwrite the system 256
-        expect(cmd).to include %Q{export VCAP_SERVICES="}
 
-        expect(cmd).to match %r{.*/bin/run .*/plugin_config >> /tmp/staged/logs/staging_task.log 2>&1$}
+    context "with mock staging" do
+      before do
+        staging.container.should_receive(:run_script) do |_, cmd|
+          expect(cmd).to include %Q{export FOO="BAR";}
+          expect(cmd).to include %Q{export BUILDPACK_CACHE="buildpack_cache_url";}
+          expect(cmd).to include %Q{export STAGING_TIMEOUT="900.0";}
+          expect(cmd).to include %Q{export MEMORY_LIMIT="512m";} # the user assiged 512 should overwrite the system 256
+          expect(cmd).to include %Q{export VCAP_SERVICES="}
+
+          expect(cmd).to match %r{.*/bin/run .*/plugin_config | tee -a /tmp/staged/logs/staging_task.log}
+        end.and_return(double(:stdout => "stdout message", :stderr => "stderr message"))
       end
-      staging.promise_stage.resolve
+
+      it "assembles a shell command and initiates collection of task log" do
+        staging.promise_stage.resolve
+      end
+
+      it "logs to the loggregator" do
+        @emitter.reset
+        staging.promise_stage.resolve
+        app_id = staging.attributes['app_id']
+        expect(@emitter.messages.size).to eql(1)
+        expect(@emitter.error_messages.size).to eql(1)
+        expect(@emitter.messages[app_id][0]).to eql("stdout message")
+        expect(@emitter.error_messages[app_id][0]).to eql("stderr message")
+      end
     end
 
     context "when env variables need to be escaped" do
       before { attributes["start_message"]["env"] = ["PATH=x y z", "FOO=z'y\"d", "BAR=", "BAZ=foo=baz"] }
+      let (:returned_streams) { double(:stdout => "", :stderr => "") }
 
       it "copes with spaces" do
         staging.container.should_receive(:run_script) do |_, cmd|
           expect(cmd).to include(%Q{export PATH="x y z";})
-        end
+        end.and_return(returned_streams)
         staging.promise_stage.resolve
       end
 
       it "copes with quotes" do
         staging.container.should_receive(:run_script) do |_, cmd|
           expect(cmd).to include(%Q{export FOO="z'y\\"d";})
-        end
+        end.and_return(returned_streams)
         staging.promise_stage.resolve
       end
 
       it "copes with blank" do
         staging.container.should_receive(:run_script) do |_, cmd|
           expect(cmd).to include(%Q{export BAR="";})
-        end
+        end.and_return(returned_streams)
         staging.promise_stage.resolve
       end
 
       it "copes with equal sign" do
         staging.container.should_receive(:run_script) do |_, cmd|
           expect(cmd).to include(%Q{export BAZ="foo=baz";})
-        end
+        end.and_return(returned_streams)
         staging.promise_stage.resolve
       end
     end
@@ -133,7 +155,7 @@ describe Dea::StagingTask do
 
           staging.container.should_receive(:run_script) do
             sleep 0.75
-          end
+          end.and_return(double(:stdout => "", :stderr => ""))
 
           expect { staging.promise_stage.resolve }.to_not raise_error
         end
@@ -222,10 +244,10 @@ YAML
 
     it "should pass the list of buildpacks in use to the workspace" do
       Dea::StagingTaskWorkspace.should_receive(:new).with(
-        base_dir,
-        valid_staging_attributes["admin_buildpacks"],
-        buildpacks_in_use,
-        valid_staging_attributes["properties"]
+          base_dir,
+          valid_staging_attributes["admin_buildpacks"],
+          buildpacks_in_use,
+          valid_staging_attributes["properties"]
       ).and_return(Struct.new(:prepare).new(nil))
 
       new_staging = Dea::StagingTask.new(bootstrap, dir_server, attributes, buildpacks_in_use)
@@ -236,7 +258,7 @@ YAML
   describe "#admin_buildpacks" do
 
     let(:attributes) do
-      valid_staging_attributes.merge( { "admin_buildpacks" => %w(a b c) } )
+      valid_staging_attributes.merge({"admin_buildpacks" => %w(a b c)})
     end
 
     it "returns the list of buildpacks passed in the constructor" do
@@ -419,8 +441,8 @@ YAML
     it_calls_callback :setup, :failure_cause => :promise_app_download
 
     it_calls_callback :complete, {
-      :failure_cause => :promise_stage,
-      :callback_failure_cleanup_assertions => true
+        :failure_cause => :promise_stage,
+        :callback_failure_cleanup_assertions => true
     }
 
     it "should clean up after itself" do
@@ -467,7 +489,7 @@ YAML
     describe "#bind_mounts" do
       it 'includes the workspace dir' do
         staging.bind_mounts.should include('src_path' => staging.workspace.workspace_dir,
-                                              'dst_path' => staging.workspace.workspace_dir)
+                                           'dst_path' => staging.workspace.workspace_dir)
       end
 
       it 'includes the build pack url' do
@@ -477,8 +499,8 @@ YAML
 
       it 'includes the configured bind mounts' do
         mount = {
-          'src_path' => 'a',
-          'dst_path' => 'b'
+            'src_path' => 'a',
+            'dst_path' => 'b'
         }
         staging.config["bind_mounts"] = [mount]
         staging.bind_mounts.should include(mount)
@@ -490,7 +512,7 @@ YAML
       staging.workspace.should_receive(:prepare).ordered
       staging.workspace.workspace_dir
       staging.container.should_receive(:create_container).
-        with(staging.bind_mounts, staging.disk_limit_in_bytes, staging.memory_limit_in_bytes, with_network).ordered
+          with(staging.bind_mounts, staging.disk_limit_in_bytes, staging.memory_limit_in_bytes, with_network).ordered
       %w(
         promise_app_download
         promise_prepare_staging_log
@@ -508,7 +530,7 @@ YAML
     context "when buildpack_cache_download_uri is provided" do
       before do
         staging.stub(:attributes).and_return(
-          valid_staging_attributes.merge({ "buildpack_cache_download_uri" => "http://some_url" }))
+            valid_staging_attributes.merge({"buildpack_cache_download_uri" => "http://some_url"}))
       end
 
       it "downloads buildpack cache" do
@@ -697,7 +719,7 @@ YAML
     context "when there is an error" do
       before do
         Download.any_instance.stub(:download!).and_yield(
-          RuntimeError.new("This is an error"))
+            RuntimeError.new("This is an error"))
       end
 
       it { expect { subject }.to raise_error(RuntimeError, "This is an error") }
@@ -734,7 +756,7 @@ YAML
     context "when there is an error" do
       before do
         Download.any_instance.stub(:download!).and_yield(
-          RuntimeError.new("This is an error"))
+            RuntimeError.new("This is an error"))
       end
 
       its(:result) { should eq([:deliver, nil]) }
@@ -759,12 +781,24 @@ YAML
   end
 
   describe "#promise_unpack_app" do
-    it "assembles a shell command" do
+
+    before do
       staging.container.should_receive(:run_script) do |connection_name, cmd|
         cmd.should include("unzip -q #{workspace_dir}/app.zip -d /tmp/unstaged")
-      end
+      end.and_return(double(:stdout => "stdout message", :stderr => "stderr message"))
+    end
 
+    it "assembles a shell command" do
       staging.promise_unpack_app.resolve
+    end
+
+    it "logs to loggregator" do
+      staging.promise_unpack_app.resolve
+      app_id = staging.attributes['app_id']
+      expect(@emitter.messages.size).to eql(1)
+      expect(@emitter.error_messages.size).to eql(1)
+      expect(@emitter.messages[app_id][0]).to eql("stdout message")
+      expect(@emitter.error_messages[app_id][0]).to eql("stderr message")
     end
   end
 
@@ -779,14 +813,22 @@ YAML
     context "when buildpack cache exists" do
       before do
         FileUtils.touch("#{workspace_dir}/buildpack_cache.tgz")
+        staging.container.should_receive(:run_script) do |_, cmd|
+          cmd.should include("tar xfz #{workspace_dir}/buildpack_cache.tgz -C /tmp/cache")
+        end.and_return(double(:stdout => "stdout message", :stderr => "stderr message"))
       end
 
       it "assembles a shell command" do
-        staging.container.should_receive(:run_script) do |_, cmd|
-          cmd.should include("tar xfz #{workspace_dir}/buildpack_cache.tgz -C /tmp/cache")
-        end
-
         staging.promise_unpack_buildpack_cache.resolve
+      end
+
+      it "logs to loggregator" do
+        staging.promise_unpack_buildpack_cache.resolve
+        app_id = staging.attributes['app_id']
+        expect(@emitter.messages.size).to eql(1)
+        expect(@emitter.error_messages.size).to eql(1)
+        expect(@emitter.messages[app_id][0]).to eql("stdout message")
+        expect(@emitter.error_messages[app_id][0]).to eql("stderr message")
       end
     end
   end
@@ -859,7 +901,7 @@ YAML
     context "when there is an error" do
       before do
         Upload.any_instance.stub(:upload!).and_yield(
-          RuntimeError.new("This is an error"))
+            RuntimeError.new("This is an error"))
       end
 
       it { expect { subject }.to raise_error(RuntimeError, "This is an error") }
@@ -881,7 +923,7 @@ YAML
     context "when there is an error" do
       before do
         Upload.any_instance.stub(:upload!).and_yield(
-          RuntimeError.new("This is an error"))
+            RuntimeError.new("This is an error"))
       end
 
       it { expect { subject }.to raise_error(RuntimeError, "This is an error") }
@@ -920,7 +962,7 @@ YAML
       staging.workspace.stub(:staged_droplet_path) { __FILE__ }
       bootstrap.stub(:droplet_registry) do
         {
-          droplet_sha => droplet
+            droplet_sha => droplet
         }
       end
     end
